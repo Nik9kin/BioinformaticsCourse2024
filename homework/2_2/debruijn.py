@@ -33,9 +33,12 @@ class Assembler():
                 edge = self.G[kmer[:-1]][kmer[1:]][kmer]
                 edge['coverage'] += 1.0
 
-    def _compactify(self):
+    def compactify(self, verbose=False):
         nodes_list = list(self.G.nodes)
         np.random.shuffle(nodes_list)
+
+        if verbose:
+            nodes_list = tqdm(nodes_list)
 
         for node in nodes_list:
             if self.G.in_degree(node) == self.G.out_degree(node) == 1:
@@ -54,7 +57,7 @@ class Assembler():
                     self.G.add_edge(pred, succ, key=seq_conc, coverage=cov_new)
                     self.G.remove_node(node)
 
-    def _cut_tails(self, factor=0.3):
+    def cut_tails(self, factor=0.3):
         tails = []
 
         for pred, succ, seq, attrs in self.G.edges(keys=True, data=True):
@@ -74,7 +77,7 @@ class Assembler():
 
         self.G.remove_nodes_from(list(nx.isolates(self.G)))
 
-    def _burst_bubbles(self, factor=0.3):
+    def burst_bubbles(self, factor=0.3):
         bubble_pairs = set()
 
         for prev, succ in self.G.edges(keys=False):
@@ -98,7 +101,7 @@ class Assembler():
                 if cov < factor * max_cov:
                     self.G.remove_edge(prev, succ, seq)
 
-    def _drop_low_covered_edges(self, factor=0.1):
+    def drop_low_covered_edges(self, cov_thres=1.0):
         edges_list = []
 
         for prev, succ, seq, attrs in self.G.edges(keys=True, data=True):
@@ -108,21 +111,31 @@ class Assembler():
         if not edges_list:
             return
 
-        edges_list = sorted(edges_list)
-        max_cov = edges_list[-1][0]
-
         for cov, prev, succ, seq in edges_list:
-            if cov < factor * max_cov:
+            if cov <= cov_thres:
                 self.G.remove_edge(prev, succ, seq)
 
         self.G.remove_nodes_from(list(nx.isolates(self.G)))
 
-    def run(self):
-        self._compactify()
-        self._burst_bubbles()
-        self._cut_tails()
-        self._drop_low_covered_edges()
-        self._compactify()
+    def run(self,
+            verbose=False):
+        """
+        Run standard pipeline with default params: `compactify`, `burst_bubbles`,
+        `cut_tails`, `drop_low_covered_edges` and `compactify` again
+
+        :param verbose: (default *False*)
+        """
+        self.compactify(verbose=verbose)
+        self.burst_bubbles()
+        self.cut_tails()
+        self.drop_low_covered_edges()
+        self.compactify(verbose=verbose)
+
+    def get_node_degrees(self):
+        return list(self.G.degree)
+
+    def get_edge_cov(self):
+        return [attrs['coverage'] for *_, attrs in self.G.edges(data=True)]
 
     def get_contigs(self):
         contigs = []
@@ -142,17 +155,12 @@ class Assembler():
                    ax=None,
                    edge_labels='auto',
                    show_node_labels='auto',
-                   layout='spring'):
+                   layout=nx.kamada_kawai_layout):
         if ax is None:
             plt.figure(figsize=(12, 12))
 
-        connectionstyle = [f"arc3,rad={r}" for r in it.accumulate([0.15] * 4)]
-        if layout == 'spring':
-            pos = nx.spring_layout(self.G)
-        elif layout == 'shell':
-            pos = nx.shell_layout(self.G)
-        else:
-            raise ValueError(f"Unknown layout: {layout}")
+        connectionstyle = [f"arc3,rad={r}" for r in it.accumulate([0.30] * 4)]
+        pos = layout(self.G)
 
         nx.draw_networkx_nodes(self.G, pos, ax=ax)
 
@@ -168,12 +176,12 @@ class Assembler():
 
         if edge_labels == 'auto':
             labels = {
-                tuple(edge): f"{self._short_view(seq)}\ncov={attrs['coverage']:.2f}"
+                tuple((*edge, seq)): f"{self._short_view(seq)}\ncov={attrs['coverage']:.2f}"
                 for *edge, seq, attrs in self.G.edges(keys=True, data=True)
             }
         elif edge_labels == 'coverage':
             labels = {
-                tuple(edge): f"{attrs['coverage']:.2f}"
+                tuple((*edge, seq)): f"{attrs['coverage']:.2f}"
                 for *edge, seq, attrs in self.G.edges(keys=True, data=True)
             }
         else:
