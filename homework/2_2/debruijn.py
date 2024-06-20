@@ -1,18 +1,20 @@
 import itertools as it
+
+import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
+
 from Bio.Seq import Seq
 from Bio.SeqIO import parse
-import numpy as np
 from tqdm import tqdm
 
 
-class Assembler():
+class Assembler:
     def __init__(self, k):
         """
         Genome assembler based on De Bruijn graph
 
-        :param k: k-mer length. Recommended k = 4n + 1
+        :param k: k-mer length
         """
         self.G = nx.MultiDiGraph()
         self.k = k
@@ -22,16 +24,16 @@ class Assembler():
 
         for read in tqdm(reads):
             for i in range(len(read) - self.k + 1):
-                kmer = read[i: i + self.k]
-                if not self.G.has_edge(kmer[:-1], kmer[1:]):
+                kmer = str(read[i: i + self.k])
+                prefix, suffix = kmer[:-1], kmer[1:]
+                if not self.G.has_edge(prefix, suffix):
                     self.G.add_edge(
-                        kmer[:-1], kmer[1:],
+                        prefix, suffix,
                         key=kmer,
-                        coverage=0.0
+                        coverage=1.0
                     )
-
-                edge = self.G[kmer[:-1]][kmer[1:]][kmer]
-                edge['coverage'] += 1.0
+                else:
+                    self.G[prefix][suffix][kmer]['coverage'] += 1.0
 
     def compactify(self, verbose=False):
         nodes_list = list(self.G.nodes)
@@ -47,15 +49,18 @@ class Assembler():
                 if pred != node != succ:
                     seq1 = next(iter(self.G[pred][node]))
                     seq2 = next(iter(self.G[node][succ]))
-                    seq_conc = seq1 + seq2[self.k - 1:]
+                    seq_new = seq1 + seq2[self.k - 1:]
 
                     cov1 = self.G[pred][node][seq1]['coverage']
                     cov2 = self.G[node][succ][seq2]['coverage']
                     len1, len2 = len(seq1), len(seq2)
                     cov_new = (cov1 * len1 + cov2 * len2) / (len1 + len2)
 
-                    self.G.add_edge(pred, succ, key=seq_conc, coverage=cov_new)
+                    self.G.add_edge(pred, succ, key=seq_new, coverage=cov_new)
                     self.G.remove_node(node)
+
+    def _del_isolates(self):
+        self.G.remove_nodes_from(list(nx.isolates(self.G)))
 
     def cut_tails(self, factor=0.3):
         tails = []
@@ -75,18 +80,18 @@ class Assembler():
             if len_cov < factor * max_len_cov:
                 self.G.remove_edge(pred, succ, seq)
 
-        self.G.remove_nodes_from(list(nx.isolates(self.G)))
+        self._del_isolates()
 
-    def burst_bubbles(self, factor=0.3):
+    def burst_bubbles(self, cov_thres=1.001):
         bubble_pairs = set()
 
-        for prev, succ in self.G.edges(keys=False):
-            if len(self.G[prev][succ]) > 1:
-                bubble_pairs.add((prev, succ))
+        for pred, succ in self.G.edges(keys=False):
+            if len(self.G[pred][succ]) > 1:
+                bubble_pairs.add((pred, succ))
 
-        for prev, succ in bubble_pairs:
+        for pred, succ in bubble_pairs:
             bubble_edges = []
-            for seq, attrs in self.G[prev][succ].items():
+            for seq, attrs in self.G[pred][succ].items():
                 cov = attrs['coverage']
                 if len(seq) == 2 * self.k - 1:
                     bubble_edges.append((cov, seq))
@@ -94,28 +99,19 @@ class Assembler():
             if not bubble_edges:
                 continue
 
-            bubble_edges = sorted(bubble_edges)
-            max_cov = bubble_edges[-1][0]
-
             for cov, seq in bubble_edges:
-                if cov < factor * max_cov:
-                    self.G.remove_edge(prev, succ, seq)
+                if cov <= cov_thres:
+                    self.G.remove_edge(pred, succ, seq)
 
     def drop_low_covered_edges(self, cov_thres=1.0):
-        edges_list = []
+        low_covered_edges = []
 
-        for prev, succ, seq, attrs in self.G.edges(keys=True, data=True):
-            cov = attrs['coverage']
-            edges_list.append((cov, prev, succ, seq))
+        for pred, succ, seq, attrs in self.G.edges(keys=True, data=True):
+            if attrs['coverage'] <= cov_thres:
+                low_covered_edges.append((pred, succ, seq))
 
-        if not edges_list:
-            return
-
-        for cov, prev, succ, seq in edges_list:
-            if cov <= cov_thres:
-                self.G.remove_edge(prev, succ, seq)
-
-        self.G.remove_nodes_from(list(nx.isolates(self.G)))
+        self.G.remove_edges_from(low_covered_edges)
+        self._del_isolates()
 
     def run(self,
             verbose=False):
@@ -134,69 +130,86 @@ class Assembler():
     def get_node_degrees(self):
         return list(self.G.degree)
 
-    def get_edge_cov(self):
-        return [attrs['coverage'] for *_, attrs in self.G.edges(data=True)]
+    def get_tails(self):
+        tails = []
+
+        for pred, succ, seq, attrs in self.G.edges(keys=True, data=True):
+            cov = attrs['coverage']
+            if (self.G.degree(pred) == 1) != (self.G.degree(succ) == 1):
+                tails.append((len(seq), cov, seq))
+
+        return tails
+
+    def get_edges(self):
+        return [(attrs['coverage'], seq)
+                for *_, seq, attrs in self.G.edges(keys=True, data=True)]
 
     def get_contigs(self):
-        contigs = []
-
-        for *_, seq, attrs in self.G.edges(keys=True, data=True):
-            cov = attrs['coverage']
-            contigs.append((seq, cov))
-
-        contigs = sorted(contigs, key=lambda tup: tup[1], reverse=True)
-        return contigs
+        # should be modified with using euler paths in graph
+        return sorted(self.get_edges(), reverse=True)
 
     def print_graph_size(self):
         print(f'Graph size: {self.G.number_of_nodes()} nodes '
               f'and {self.G.number_of_edges()} edges')
 
     def plot_graph(self,
+                   subgraph=None,
                    ax=None,
                    edge_labels='auto',
                    show_node_labels='auto',
+                   font_size=10,
                    layout=nx.kamada_kawai_layout):
+        if subgraph is None:
+            subgraph = self.G
+
         if ax is None:
             plt.figure(figsize=(12, 12))
 
         connectionstyle = [f"arc3,rad={r}" for r in it.accumulate([0.30] * 4)]
-        pos = layout(self.G)
+        pos = layout(subgraph)
 
-        nx.draw_networkx_nodes(self.G, pos, ax=ax)
+        nx.draw_networkx_nodes(subgraph, pos, ax=ax)
 
         if show_node_labels == 'auto':
             if self.k <= 9:
-                nx.draw_networkx_labels(self.G, pos, ax=ax)
+                nx.draw_networkx_labels(subgraph, pos, ax=ax)
         elif show_node_labels:
-            nx.draw_networkx_labels(self.G, pos, ax=ax)
+            nx.draw_networkx_labels(subgraph, pos, ax=ax)
 
         nx.draw_networkx_edges(
-            self.G, pos, edge_color="grey", connectionstyle=connectionstyle, ax=ax
+            subgraph, pos, edge_color="grey", connectionstyle=connectionstyle, ax=ax
         )
 
         if edge_labels == 'auto':
             labels = {
-                tuple((*edge, seq)): f"{self._short_view(seq)}\ncov={attrs['coverage']:.2f}"
-                for *edge, seq, attrs in self.G.edges(keys=True, data=True)
+                tuple(edge): f"{self._short_view(edge[-1])}\ncov={attrs['coverage']:.2f}"
+                for *edge, attrs in subgraph.edges(keys=True, data=True)
             }
         elif edge_labels == 'coverage':
             labels = {
-                tuple((*edge, seq)): f"{attrs['coverage']:.2f}"
-                for *edge, seq, attrs in self.G.edges(keys=True, data=True)
+                tuple(edge): f"{attrs['coverage']:.2f}"
+                for *edge, attrs in subgraph.edges(keys=True, data=True)
             }
         else:
             raise ValueError(f"Unexpected value for edge_labels: {edge_labels}")
 
         nx.draw_networkx_edge_labels(
-            self.G,
+            subgraph,
             pos,
             labels,
             connectionstyle=connectionstyle,
             label_pos=0.3,
             font_color="blue",
+            font_size=font_size,
             bbox={"alpha": 0},
             ax=ax,
         )
+
+    def plot_graph_componentwise(self, *args, **kwargs):
+        for nodes in nx.weakly_connected_components(self.G):
+            subgraph = self.G.subgraph(nodes)
+            self.plot_graph(subgraph, *args, **kwargs)
+            plt.show()
 
     @staticmethod
     def _short_view(seq: Seq | str) -> str:
@@ -218,13 +231,15 @@ if __name__ == '__main__':
         with open(filename, 'r') as f_in:
             reads = (record.seq for record in parse(f_in, 'fasta'))
             assembler.build_graph(reads)
-            assembler.run()
-            contigs = assembler.get_contigs()
-            for contig in contigs:
-                print(contig)
+            print(f'Graph before: {assembler.G}')
+            assembler.run(verbose=(k > 10))
+            print(f'Graph after: {assembler.G}')
+            # contigs = assembler.get_contigs()
+            # for contig in contigs:
+            #     print(contig)
 
             if assembler.G.order() < 120:
-                assembler.plot_graph()
+                assembler.plot_graph(font_size=7)
                 plt.show()
             else:
                 print(assembler.G)
