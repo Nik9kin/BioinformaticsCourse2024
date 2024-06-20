@@ -17,10 +17,13 @@ class Assembler:
         self.G = nx.MultiDiGraph()
         self.k = k
 
-    def build_graph(self, reads):
+    def build_graph(self, reads, verbose=False):
         self.G = nx.MultiDiGraph()
 
-        for read in tqdm(reads):
+        if verbose:
+            reads = tqdm(reads)
+
+        for read in reads:
             for i in range(len(read) - self.k + 1):
                 kmer = str(read[i: i + self.k])
                 prefix, suffix = kmer[:-1], kmer[1:]
@@ -155,13 +158,14 @@ class Assembler:
                    ax=None,
                    edge_labels='auto',
                    show_node_labels='auto',
+                   layout=nx.kamada_kawai_layout,
                    font_size=10,
-                   layout=nx.kamada_kawai_layout):
+                   figsize=(12, 12)):
         if subgraph is None:
             subgraph = self.G
 
         if ax is None:
-            plt.figure(figsize=(12, 12))
+            plt.figure(figsize=figsize)
 
         connectionstyle = [f"arc3,rad={r}" for r in it.accumulate([0.30] * 4)]
         pos = layout(subgraph)
