@@ -4,8 +4,6 @@ import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
 
-from Bio.Seq import Seq
-from Bio.SeqIO import parse
 from tqdm import tqdm
 
 
@@ -212,7 +210,7 @@ class Assembler:
             plt.show()
 
     @staticmethod
-    def _short_view(seq: Seq | str) -> str:
+    def _short_view(seq: str) -> str:
         if len(seq) <= 9:
             return str(seq)
         else:
@@ -220,6 +218,8 @@ class Assembler:
 
 
 if __name__ == '__main__':
+    from Bio.SeqIO import parse
+
     for filename, k in [
         ('test/reads_0.fasta', 3),
         ('test/reads_1.fasta', 9),
@@ -239,7 +239,7 @@ if __name__ == '__main__':
             #     print(contig)
 
             if assembler.G.order() < 120:
-                assembler.plot_graph(font_size=7)
+                assembler.plot_graph(font_size=9)
                 plt.show()
             else:
                 print(assembler.G)
